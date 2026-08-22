@@ -150,7 +150,7 @@ def main():
     ex.add_argument("--iters", type=int, default=2500)
     ex.add_argument("--snapshot-every", type=int, default=100)
     ex.add_argument("--seeds", type=int, default=3)
-    ex.add_argument("--lr", default="5e-4")
+    ex.add_argument("--lr", default="2e-4")
     ex.add_argument("--tau", default="0.2")
     ex.add_argument("--curve-games", type=int, default=1024)
     ex.add_argument("--confirm-games", type=int, default=2048)
