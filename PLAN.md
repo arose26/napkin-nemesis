@@ -94,12 +94,13 @@ numbers and intervals registered at start-of-experiment).
   ladder baseline reflects our best known net before this series reads it.
   **Done 2026-08-22**: resubmitted the archived rank-34 artifact `c4_bot_v2.cpp`
   (verified against gpunet_v2.pt: check-pack value drift 1e-6, policy argmax 32/32;
-  sandbox TestSession/play passed), agent id 41177999. First post-placement snapshot
-  (15:25 UTC, ~2.4h after submit): score 30.93, rank 49 — the SAME bytes scored 32.24
-  two days earlier. Either placement was still converging or the field drifted ~1.3
-  points in two days; a second snapshot is scheduled. Methodology consequence either
-  way: E3's ladder outcome must be scored against a same-day baseline reading, never
-  against a historical score.
+  sandbox TestSession/play passed), agent id 41177999. Post-placement snapshots at
+  15:25 and 16:56 UTC read identically: score 30.93, rank 49 — settled. The SAME bytes
+  scored 32.24 two days earlier, so the field drifts ~1.3 points/2 days and historical
+  ladder scores are not comparable across days. Consequences: (1) E3's ladder outcome
+  is scored against a same-day reading of this standing v2 baseline; (2) whether v2
+  still beats soup in TODAY'S field is unknown and not worth a submission to find out;
+  the pre-committed rollback stands and v2 remains the incumbent until E3's winner.
 
 ### E1 — is exploitability real, and does it explain our anomaly? (measurement)
 Measure exploit() for the c4 lineage: v1, v2, v3peak, soup, + minimax-d2 anchor.
