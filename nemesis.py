@@ -38,11 +38,17 @@ EVAL_RE = re.compile(r"score (\d\.\d+) \(95% Wilson (\d\.\d+)\.\.(\d\.\d+)\).*?"
                      r"(\d+) distinct final positions", re.S)
 
 
+def _eval_args(net, vs, games, seed):
+    sel = ["--vs", vs] if vs in ("greedy", "random") else ["--vs-net", vs]
+    # k=4 opening plies is the registered standard (k=8 compresses differences,
+    # measured in the source repo); eval-net's own default is 8
+    return (["eval-net", "--net", net] + sel +
+            ["--games", games, "--seed", seed, "--open-plies", 4])
+
+
 def eval_net(net, vs, games, seed):
     """One eval-net reading. `vs` is a checkpoint path or 'greedy'/'random'."""
-    sel = ["--vs", vs] if vs in ("greedy", "random") else ["--vs-net", vs]
-    out = engine(["eval-net", "--net", net] + sel +
-                 ["--games", games, "--seed", seed])
+    out = engine(_eval_args(net, vs, games, seed))
     m = EVAL_RE.search(out)
     if not m:
         raise RuntimeError(f"unparseable eval-net output: {out[-300:]}")
@@ -125,7 +131,12 @@ def cmd_selfcheck(a):
               "128 games from 8 random opening plies, 116 distinct final positions")
     m = EVAL_RE.search(canned)
     assert m and m.groups() == ("0.875", "0.807", "0.922", "116"), m
-    print("nemesis selfcheck: eval-net parse contract OK")
+    # the registered protocol: k=4 openings on every reading, both vs modes
+    a1 = _eval_args("a.pt", "b.pt", 1024, 1)
+    a2 = _eval_args("a.pt", "greedy", 2048, 3)
+    assert a1[-2:] == ["--open-plies", 4] and "--vs-net" in a1, a1
+    assert a2[-2:] == ["--open-plies", 4] and "--vs" in a2, a2
+    print("nemesis selfcheck: eval-net parse + k=4 invocation contracts OK")
     return 0
 
 
