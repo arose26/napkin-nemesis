@@ -68,6 +68,8 @@ def cmd_exploit(a):
                  "--snapshot-every", a.snapshot_every, "--out", f"{stem}.pt"]
         if a.bootstrap == "warm":
             train += ["--init", a.target]
+        elif a.bootstrap.startswith("ckpt:"):
+            train += ["--init", a.bootstrap[5:]]
         print(f"[{a.tag}] seed {seed}: training {a.iters} iters "
               f"({a.bootstrap} start)", flush=True)
         engine(train, log=f"{HERE}/{stem}.log")
@@ -124,6 +126,68 @@ def cmd_panel(a):
     return 0
 
 
+def cmd_perturb(a):
+    """Write a copy of a checkpoint with per-tensor gaussian noise added:
+    sigma = --scale x that tensor's own weight std (E2's A4 bootstrap)."""
+    import torch
+    torch.manual_seed(a.seed)
+    ck = torch.load(a.net, map_location="cpu", weights_only=False)
+    sd = ck["state_dict"]
+    for k, w in sd.items():
+        if w.dtype.is_floating_point and w.numel() > 1:
+            sd[k] = w + torch.randn_like(w) * (a.scale * w.std())
+    torch.save(ck, a.out)
+    print(f"perturbed {a.net} -> {a.out} (scale {a.scale}, seed {a.seed})")
+    return 0
+
+
+def cmd_disagree(a):
+    """Pairwise argmax disagreement between nets, on states drawn from each
+    net's OWN games vs the frozen target (the states where exploits manifest;
+    ordinary target-vs-target states are the wrong distribution)."""
+    import sys as _sys
+    _sys.path.insert(0, HERE)
+    import torch
+    from napkin_c4 import TensorC4, improved_policy, load_aznet, random_openings
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    paths = a.nets.split(",")
+    nets = [load_aznet(pp, dev)[0] for pp in paths]
+    tgt = load_aznet(a.target, dev)[0]
+    B = 512
+    counts = {}
+    with torch.no_grad():
+        for di, driver in enumerate(nets):
+            torch.manual_seed(a.seed + di)
+            t = TensorC4(B, dev)
+            random_openings(t, a.open_plies)
+            seat = torch.arange(B, device=dev) % 2
+            drv = torch.zeros(B, dtype=torch.long, device=dev)
+            for _ in range(a.max_plies):
+                mine = (t.side == seat) & ~t.done
+                if bool(mine.any()):
+                    moves = []
+                    for net in nets:
+                        _, pi, _ = improved_policy(t, net, tau=0.2, depth=2)
+                        moves.append(pi.argmax(dim=1))
+                    n_states = int(mine.sum())
+                    for i in range(len(nets)):
+                        for j in range(i + 1, len(nets)):
+                            key = (i, j)
+                            d0, n0 = counts.get(key, (0, 0))
+                            dd = int((moves[i][mine] != moves[j][mine]).sum())
+                            counts[key] = (d0 + dd, n0 + n_states)
+                    drv = moves[di]
+                _, tpi, _ = improved_policy(t, tgt, tau=0.2, depth=2)
+                t.step(torch.where(mine, drv, tpi.argmax(dim=1)))
+                if bool(t.done.all()):
+                    break
+    for (i, j), (d, n) in sorted(counts.items()):
+        print(f"disagree {paths[i].split('/')[-1]} vs {paths[j].split('/')[-1]}: "
+              f"{d / n:.4f} (n={n})")
+    return 0
+
+
 def cmd_selfcheck(a):
     # the fragile part is parsing the engine's human-oriented output; pin it
     canned = ("out/x.pt (trunk 160-112) vs greedy: score 0.875 "
@@ -146,7 +210,8 @@ def main():
     ex = sub.add_parser("exploit")
     ex.add_argument("--target", required=True)
     ex.add_argument("--tag", required=True)
-    ex.add_argument("--bootstrap", default="warm", choices=("warm", "scratch"))
+    ex.add_argument("--bootstrap", default="warm",
+                    help="warm | scratch | ckpt:<path>")
     ex.add_argument("--iters", type=int, default=2500)
     ex.add_argument("--snapshot-every", type=int, default=100)
     ex.add_argument("--seeds", type=int, default=3)
@@ -158,10 +223,21 @@ def main():
     pa.add_argument("--nets", required=True)
     pa.add_argument("--refs", default="greedy")
     pa.add_argument("--games", type=int, default=2048)
+    pt = sub.add_parser("perturb")
+    pt.add_argument("--net", required=True)
+    pt.add_argument("--out", required=True)
+    pt.add_argument("--scale", type=float, default=0.05)
+    pt.add_argument("--seed", type=int, default=7)
+    dg = sub.add_parser("disagree")
+    dg.add_argument("--nets", required=True)
+    dg.add_argument("--target", required=True)
+    dg.add_argument("--open-plies", type=int, default=4)
+    dg.add_argument("--max-plies", type=int, default=70)
+    dg.add_argument("--seed", type=int, default=11)
     sub.add_parser("selfcheck")
     a = ap.parse_args()
-    return {"exploit": cmd_exploit, "panel": cmd_panel,
-            "selfcheck": cmd_selfcheck}[a.cmd](a)
+    return {"exploit": cmd_exploit, "panel": cmd_panel, "perturb": cmd_perturb,
+            "disagree": cmd_disagree, "selfcheck": cmd_selfcheck}[a.cmd](a)
 
 
 if __name__ == "__main__":
