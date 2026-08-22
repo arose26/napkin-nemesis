@@ -953,6 +953,50 @@ def best_response_step(t, learner_seat, learner_mv, opp_mv):
     return torch.where(mine, learner_mv, opp_mv), (~t.done) & mine
 
 
+def select_moves(t, net, opp, learner_seat, eps, tau, depth, opening_plies):
+    """One collection step's moves for every live game.
+
+    opp: None for self-play, ("net", frozen_net) or ("greedy",) for
+    best-response mode. Returns (x, pi, mv, live): the encoded states, the
+    learner's improved-policy targets, the move each game takes, and which
+    entries to record.
+
+    Two rules both modes share, factored here so selfcheck asserts the exact
+    code the trainer runs:
+
+    - The opening window is the GAME's first `opening_plies` turns (t.turn).
+      In best-response mode the recorded-ply counter advances only on learner
+      plies, so gating exploration on it would silently double the window.
+    - Exploration is MIRRORED: in best-response mode the frozen opponent
+      samples its own eps/tau mixture during the opening, exactly like the
+      learner. A pure-argmax frozen opponent punishes every exploration
+      blunder: measured 3,025/3,025 learner LOSSES between IDENTICAL nets
+      (avg game 11.4 plies), which fills the buffer with z=-1 and collapses
+      the value head -- the death spiral behind the first (broken) nemesis
+      run. With mirroring, twin-vs-twin reads ~0.500 by construction.
+    """
+    import torch
+    x = t.encode()
+    _, pi, legal = improved_policy(t, net, tau=tau, depth=depth)
+    u = legal.float()
+    u = u / u.sum(dim=1, keepdim=True).clamp_min(1e-9)
+    act_p = (1 - eps) * pi + eps * u
+    mv_s = torch.multinomial(act_p.clamp_min(1e-12), 1).squeeze(1)
+    opening = t.turn < opening_plies
+    mv = torch.where(opening, mv_s, pi.argmax(dim=1))
+    live = ~t.done
+    if opp is not None:
+        if opp[0] == "greedy":
+            omv = gpu_greedy(t)
+        else:
+            _, opi, _ = improved_policy(t, opp[1], tau=tau, depth=depth)
+            oact = (1 - eps) * opi + eps * u
+            omv_s = torch.multinomial(oact.clamp_min(1e-12), 1).squeeze(1)
+            omv = torch.where(opening, omv_s, opi.argmax(dim=1))
+        mv, live = best_response_step(t, learner_seat, mv, omv)
+    return x, pi, mv, live
+
+
 def cmd_train_gpu(args):
     """Self-play on GPU with one-ply-improved policy targets.
 
@@ -990,21 +1034,32 @@ def cmd_train_gpu(args):
     # Self-play's opponent distribution is a single policy (the current net); this
     # is the tool for asking whether that is why our offline edge does not reach
     # the ladder.
-    opp_net = None
+    opp = None
     if getattr(args, "opponent", None):
-        opp_net, oshape = load_aznet(args.opponent, device)
-        if list(oshape) != [N_IN, AZ_TRUNK1, AZ_TRUNK2, N_ACT]:
-            raise ValueError(f"{args.opponent} has shape {list(oshape)} but this "
-                             f"build is {[N_IN, AZ_TRUNK1, AZ_TRUNK2, N_ACT]}")
-        for q in opp_net.parameters():
-            q.requires_grad_(False)
-        print(f"frozen opponent: {args.opponent} (best-response mode)", flush=True)
+        if args.opponent == "greedy":
+            # scripted deterministic target: the positive control that the
+            # best-response procedure can find exploits at all
+            opp = ("greedy",)
+            print("frozen opponent: scripted greedy (best-response mode)",
+                  flush=True)
+        else:
+            opp_net, oshape = load_aznet(args.opponent, device)
+            if list(oshape) != [N_IN, AZ_TRUNK1, AZ_TRUNK2, N_ACT]:
+                raise ValueError(
+                    f"{args.opponent} has shape {list(oshape)} but this "
+                    f"build is {[N_IN, AZ_TRUNK1, AZ_TRUNK2, N_ACT]}")
+            for q in opp_net.parameters():
+                q.requires_grad_(False)
+            opp = ("net", opp_net)
+            print(f"frozen opponent: {args.opponent} (best-response mode)",
+                  flush=True)
 
     B = args.batch_games
     t = TensorC4(B, device)
     MAXP = CELLS + 1
     # which seat the learner occupies, alternating so neither seat is favoured
-    learner_seat = (torch.arange(B, device=device) % 2) if opp_net is not None else None
+    learner_seat = (torch.arange(B, device=device) % 2) if opp is not None else None
+    wld = [0, 0, 0]  # learner wins/losses/draws this eval window (opp mode)
 
     st_x = torch.zeros(B, MAXP, N_IN, device=device)
     st_p = torch.zeros(B, MAXP, N_ACT, device=device)
@@ -1023,24 +1078,12 @@ def cmd_train_gpu(args):
 
     for it in range(1, args.iters + 1):
         for _ in range(args.steps_per_iter):
-            x = t.encode()
-            _, pi, legal = improved_policy(t, net, tau=args.tau,
-                                            depth=args.depth)
             # Exploration belongs in the opening. Sampling every ply makes the
             # outcome nearly unpredictable, and then the value head is being
             # asked to regress noise.
-            u = legal.float()
-            u = u / u.sum(dim=1, keepdim=True).clamp_min(1e-9)
-            act_p = (1 - args.eps) * pi + args.eps * u
-            mv_s = torch.multinomial(act_p.clamp_min(1e-12), 1).squeeze(1)
-            mv = torch.where(plies < args.opening_plies, mv_s, pi.argmax(dim=1))
-
-            live = ~t.done
-            if opp_net is not None:
-                _, opi, _ = improved_policy(t, opp_net, tau=args.tau,
-                                            depth=args.depth)
-                mv, live = best_response_step(t, learner_seat, mv,
-                                              opi.argmax(dim=1))
+            x, pi, mv, live = select_moves(t, net, opp, learner_seat, args.eps,
+                                           args.tau, args.depth,
+                                           args.opening_plies)
             slot = plies.clamp(max=MAXP - 1)
             st_x[ar, slot] = torch.where(live.unsqueeze(1), x, st_x[ar, slot])
             st_p[ar, slot] = torch.where(live.unsqueeze(1), pi, st_p[ar, slot])
@@ -1059,6 +1102,15 @@ def cmd_train_gpu(args):
                 valid = (torch.arange(MAXP, device=device).unsqueeze(0)
                          < plies.unsqueeze(1)) & fin.unsqueeze(1)
                 nsel = int(valid.sum())
+                if opp is not None:
+                    wf, sf = t.winner[fin], learner_seat[fin]
+                    wld[0] += int((wf == sf).sum())
+                    wld[1] += int((wf == 1 - sf).sum())
+                    wld[2] += int((wf < 0).sum())
+                    if nsel:
+                        ls = learner_seat.unsqueeze(1).expand(B, MAXP)
+                        assert bool((st_m[valid] == ls[valid]).all()), \
+                            "recorded ply's mover != learner seat (z inverts)"
                 if nsel:
                     idx = (ptr + torch.arange(nsel, device=device)) % cap
                     bf_x[idx] = st_x[valid]
@@ -1089,10 +1141,18 @@ def cmd_train_gpu(args):
         if it % args.eval_every == 0 or it == args.iters:
             wr, nd = evaluate_vs_greedy(net, device, args.eval_games,
                                         args.seed + it, depth=args.depth)
+            extra = ""
+            if opp is not None and sum(wld):
+                n = sum(wld)
+                # under mirrored opening exploration, so it reads lower than an
+                # argmax-vs-argmax eval-net score; twin-vs-twin must print ~0.5
+                extra = (f" vs-opp(explore) {wld[0] / n:.3f}"
+                         f"/{wld[1] / n:.3f}/{wld[2] / n:.3f} (n={n})")
+                wld[0] = wld[1] = wld[2] = 0
             print(f"iter {it}/{args.iters} games {games_done} buf {filled} "
                   f"loss {float(loss):.4f} (p {float(loss_p):.4f} "
                   f"v {float(loss_v):.4f}) vs-greedy {wr:.3f} "
-                  f"[{nd} distinct] ({time.time() - t0:.0f}s)", flush=True)
+                  f"[{nd} distinct]{extra} ({time.time() - t0:.0f}s)", flush=True)
         ck = {"state_dict": net.state_dict(),
               "shape": [N_IN, AZ_TRUNK1, AZ_TRUNK2, N_ACT], "iter": it,
               "games": games_done}
@@ -2000,6 +2060,75 @@ def cmd_selfcheck(args):
         assert sum(rec_sides) <= moved * B, "recorded more plies than were played"
     except ImportError:
         print("selfcheck: torch absent, skipped the best-response contract")
+
+    # The twin null: best-response collection between IDENTICAL nets must be a
+    # fair fight. This runs the trainer's OWN move selection (select_moves), so
+    # it asserts the shipped code, not a re-implementation. Before exploration
+    # was mirrored this read 0/3025 learner wins -- the bug that destroyed the
+    # first nemesis run within 100 iterations.
+    try:
+        import torch
+        if torch.cuda.is_available():
+            dev = "cuda"
+            torch.manual_seed(0)
+            net = build_aznet(dev)
+            tw = TensorC4(512, dev)
+            seat = torch.arange(512, device=dev) % 2
+            plies = torch.zeros(512, dtype=torch.long, device=dev)
+            MAXP = CELLS + 1
+            stm = torch.zeros(512, MAXP, dtype=torch.long, device=dev)
+            ar = torch.arange(512, device=dev)
+            W = L = D = zok = ply_tot = 0
+            with torch.no_grad():
+                while W + L + D < 600:
+                    x, pi, mv, live = select_moves(tw, net, ("net", net), seat,
+                                                   0.08, 0.5, 2, 10)
+                    slot = plies.clamp(max=MAXP - 1)
+                    stm[ar, slot] = torch.where(live, tw.side, stm[ar, slot])
+                    plies = plies + live.long()
+                    tw.step(mv)
+                    fin = tw.done
+                    if bool(fin.any()):
+                        wf, sf = tw.winner[fin], seat[fin]
+                        W += int((wf == sf).sum())
+                        L += int((wf == 1 - sf).sum())
+                        D += int((wf < 0).sum())
+                        ply_tot += int(tw.turn[fin].sum())
+                        # every recorded ply's mover is the learner seat, so
+                        # z = +1 iff winner == recorded mover IS the learner's
+                        # outcome -- the sign contract, end to end
+                        w2 = tw.winner.unsqueeze(1).expand(512, MAXP)
+                        z = torch.where(w2 < 0, torch.zeros_like(w2),
+                                        torch.where(w2 == stm,
+                                                    torch.ones_like(w2),
+                                                    -torch.ones_like(w2)))
+                        valid = (torch.arange(MAXP, device=dev).unsqueeze(0)
+                                 < plies.unsqueeze(1)) & fin.unsqueeze(1)
+                        ls = seat.unsqueeze(1).expand(512, MAXP)
+                        assert bool((stm[valid] == ls[valid]).all())
+                        want = torch.where(wf < 0, torch.zeros_like(wf),
+                                           torch.where(wf == sf,
+                                                       torch.ones_like(wf),
+                                                       -torch.ones_like(wf)))
+                        per_game = torch.zeros(512, dtype=torch.long, device=dev)
+                        per_game[fin] = want
+                        zg = per_game.unsqueeze(1).expand(512, MAXP)
+                        assert bool((z[valid] == zg[valid]).all()), \
+                            "recorded z is not the learner's outcome"
+                        zok += int(valid.sum())
+                        plies = torch.where(fin, torch.zeros_like(plies), plies)
+                        tw.reset_done()
+            n = W + L + D
+            frac, avg_len = W / n, ply_tot / n
+            assert 0.40 <= frac <= 0.60, \
+                f"twin null broken: learner wins {frac:.3f} of {n}"
+            assert avg_len > 18, f"twin games too short ({avg_len:.1f} plies)"
+            print(f"selfcheck: twin null {frac:.3f} over {n} games "
+                  f"(avg {avg_len:.1f} plies, {zok} z-labels verified)")
+        else:
+            print("selfcheck: no cuda, skipped the twin-null contract")
+    except ImportError:
+        print("selfcheck: torch absent, skipped the twin-null contract")
 
     # the base85 alphabet: 85 distinct characters, none of them able to break a
     # C string literal or form a trigraph
