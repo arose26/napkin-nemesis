@@ -131,7 +131,7 @@ def cmd_perturb(a):
     sigma = --scale x that tensor's own weight std (E2's A4 bootstrap)."""
     import torch
     torch.manual_seed(a.seed)
-    ck = torch.load(a.net, map_location="cpu", weights_only=False)
+    ck = torch.load(a.net, map_location="cpu", weights_only=True)
     sd = ck["state_dict"]
     for k, w in sd.items():
         if w.dtype.is_floating_point and w.numel() > 1:
