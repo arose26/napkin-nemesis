@@ -44,7 +44,11 @@ a fixed-panel score better tracks their known ladder ordering.
 
 **E1-H1 (magnitude).** Every lineage net is exploitable: each target's confirmed peak
 is **> 0.52** (above parity beyond pooled noise; the 9x2048 confirmation has CI
-~+/-0.007). Confidence 65%. Per-target 80% intervals for the confirmed peak, calibrated
+~+/-0.007). This is a CONJUNCTION over four targets scored as one prediction at
+confidence 65%; the per-target intervals below individually admit values under 0.52
+(soup is the likeliest single miss), which is consistent with, not contradicted by,
+the 65% joint confidence. (Wording clarified minutes after registration, before any
+exploit run had produced a number; the numbers are unchanged.) Per-target 80% intervals for the confirmed peak, calibrated
 from the v3b gate plateau of ~0.537 (a WEAK target; stronger targets expected lower,
 the weakest lineage net expected higher):
 
