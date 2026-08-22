@@ -118,6 +118,17 @@ def cmd_panel(a):
     return 0
 
 
+def cmd_selfcheck(a):
+    # the fragile part is parsing the engine's human-oriented output; pin it
+    canned = ("out/x.pt (trunk 160-112) vs greedy: score 0.875 "
+              "(95% Wilson 0.807..0.922), win 0.850 draw 0.050, "
+              "128 games from 8 random opening plies, 116 distinct final positions")
+    m = EVAL_RE.search(canned)
+    assert m and m.groups() == ("0.875", "0.807", "0.922", "116"), m
+    print("nemesis selfcheck: eval-net parse contract OK")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -136,8 +147,10 @@ def main():
     pa.add_argument("--nets", required=True)
     pa.add_argument("--refs", default="greedy")
     pa.add_argument("--games", type=int, default=2048)
+    sub.add_parser("selfcheck")
     a = ap.parse_args()
-    return {"exploit": cmd_exploit, "panel": cmd_panel}[a.cmd](a)
+    return {"exploit": cmd_exploit, "panel": cmd_panel,
+            "selfcheck": cmd_selfcheck}[a.cmd](a)
 
 
 if __name__ == "__main__":
