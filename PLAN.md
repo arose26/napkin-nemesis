@@ -92,6 +92,9 @@ numbers and intervals registered at start-of-experiment).
   argmax snapshot AND mean over last 5 snapshots, never max-over-snapshots.
 - Ladder housekeeping: the owed v2 rollback (pre-committed when the soup failed), so the
   ladder baseline reflects our best known net before this series reads it.
+  **Done 2026-08-22**: resubmitted the archived rank-34 artifact `c4_bot_v2.cpp`
+  (verified against gpunet_v2.pt: check-pack value drift 1e-6, policy argmax 32/32;
+  sandbox TestSession/play passed), agent id 41177999. Placement pending ~2h.
 
 ### E1 — is exploitability real, and does it explain our anomaly? (measurement)
 Measure exploit() for the c4 lineage: v1, v2, v3peak, soup, + minimax-d2 anchor.
