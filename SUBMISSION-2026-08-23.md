@@ -15,6 +15,16 @@ metric (held-out panel: s1 0.4813, s2 0.4812) and tied head-to-head
 against the net it must displace: **e3_c1_s2 beats v2 at 0.540** vs s1's 0.517
 (6,144 games each, panel protocol).
 
+**Caveat on that tiebreak** (added post-submission, before any result): the metric I
+broke the tie with is the metric with the *worst* ladder track record in this repo —
+"beats the incumbent head-to-head" is precisely the signal that failed to transfer
+twice, and the prediction below leans on that very failure. So this is close to an
+arbitrary choice between two nets that are statistically indistinguishable on every
+measurement we have (primary metric tied to 0.0001, head-to-head tied, vs-v2 differing
+by 0.023 which is at best ~2 sigma on correlated readings). It is not a claim that s2
+is the better ladder bet; nothing we can measure offline supports such a claim. Had s1
+been submitted instead, the registered prediction below would be unchanged.
+
 Artifact: `napkin-100k-connect4/out/c4_bot_e3c1s2.cpp`, 98,359 bytes (1,641 under cap).
 Verified before submitting: check-pack max |value drift| 1e-6, policy argmax 35/35;
 check-bot 51 moves legal, 8/8 forced wins taken; sandbox TestSession/play compiled and
