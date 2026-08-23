@@ -109,6 +109,7 @@ def cmd_exploit(a):
 
 def cmd_panel(a):
     """Score each net against each reference, seeds 2/3/4, 2048 games."""
+    os.makedirs(os.path.join(HERE, "out"), exist_ok=True)
     rows = []
     for net in a.nets.split(","):
         for ref in a.refs.split(","):
