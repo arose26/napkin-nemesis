@@ -986,14 +986,32 @@ def select_moves(t, net, opp, learner_seat, eps, tau, depth, opening_plies):
     mv = torch.where(opening, mv_s, pi.argmax(dim=1))
     live = ~t.done
     if opp is not None:
-        if opp[0] == "greedy":
-            omv = gpu_greedy(t)
-        else:
-            _, opi, _ = improved_policy(t, opp[1], tau=tau, depth=depth)
+        def frozen_moves(member):
+            if member == "greedy":
+                return gpu_greedy(t)
+            _, opi, _ = improved_policy(t, member, tau=tau, depth=depth)
             oact = (1 - eps) * opi + eps * u
             omv_s = torch.multinomial(oact.clamp_min(1e-12), 1).squeeze(1)
-            omv = torch.where(opening, omv_s, opi.argmax(dim=1))
-        mv, live = best_response_step(t, learner_seat, mv, omv)
+            return torch.where(opening, omv_s, opi.argmax(dim=1))
+
+        if opp[0] == "pool":
+            # Each batch slot is permanently assigned one pool member ("self"
+            # slots are ordinary self-play). Every frozen member is evaluated
+            # on the full batch and its rows selected -- P small keeps this
+            # affordable, and slots never change owner, so the mixture is
+            # stationary and uniform by construction.
+            _, members, assign, selfm = opp
+            omv = torch.zeros_like(mv)
+            for mi, member in enumerate(members):
+                rows = assign == mi
+                if bool(rows.any()):
+                    omv = torch.where(rows, frozen_moves(member), omv)
+            bmv, blive = best_response_step(t, learner_seat, mv, omv)
+            mv = torch.where(selfm, mv, bmv)
+            live = torch.where(selfm, ~t.done, blive)
+        else:
+            omv = frozen_moves("greedy" if opp[0] == "greedy" else opp[1])
+            mv, live = best_response_step(t, learner_seat, mv, omv)
     return x, pi, mv, live
 
 
@@ -1035,7 +1053,27 @@ def cmd_train_gpu(args):
     # is the tool for asking whether that is why our offline edge does not reach
     # the ladder.
     opp = None
-    if getattr(args, "opponent", None):
+    pool_specs = None
+    if getattr(args, "opponent", None) and "," in args.opponent:
+        # POOL mode: per-slot mixture. "self" entries are plain self-play
+        # slots; the rest are frozen checkpoints (or "greedy"). Weights are
+        # given by repetition, e.g. "self,self,a.pt,b.pt" = 50% self-play.
+        pool_specs = args.opponent.split(",")
+        members, kinds = [], []
+        for spec in pool_specs:
+            if spec == "self":
+                continue
+            if spec == "greedy":
+                members.append("greedy")
+            else:
+                m_net, m_shape = load_aznet(spec, device)
+                if list(m_shape) != [N_IN, AZ_TRUNK1, AZ_TRUNK2, N_ACT]:
+                    raise ValueError(f"{spec}: shape {list(m_shape)}")
+                for q in m_net.parameters():
+                    q.requires_grad_(False)
+                members.append(m_net)
+        print(f"opponent pool: {pool_specs} (per-slot mixture)", flush=True)
+    elif getattr(args, "opponent", None):
         if args.opponent == "greedy":
             # scripted deterministic target: the positive control that the
             # best-response procedure can find exploits at all
@@ -1058,8 +1096,29 @@ def cmd_train_gpu(args):
     t = TensorC4(B, device)
     MAXP = CELLS + 1
     # which seat the learner occupies, alternating so neither seat is favoured
-    learner_seat = (torch.arange(B, device=device) % 2) if opp is not None else None
-    wld = [0, 0, 0]  # learner wins/losses/draws this eval window (opp mode)
+    learner_seat = None
+    self_mask = None
+    if pool_specs is not None:
+        P = len(pool_specs)
+        slot_spec = torch.arange(B, device=device) % P
+        self_ids = [i for i, sp in enumerate(pool_specs) if sp == "self"]
+        self_mask = torch.zeros(B, dtype=torch.bool, device=device)
+        for i in self_ids:
+            self_mask |= slot_spec == i
+        # frozen-member index per slot (-1 on self slots, never read there)
+        frozen_ids = [i for i, sp in enumerate(pool_specs) if sp != "self"]
+        assign = torch.full((B,), -1, dtype=torch.long, device=device)
+        for mi, i in enumerate(frozen_ids):
+            assign = torch.where(slot_spec == i, mi, assign)
+        opp = ("pool", members, assign, self_mask)
+        # seat must be decorrelated from the slot's pool member: with
+        # learner_seat = i %% 2 and slot_spec = i %% P, any even P fights each
+        # member from ONE seat only -- measured 0.383 between twins (first-
+        # mover advantage), which would poison every pool z-label
+        learner_seat = (torch.arange(B, device=device) // P) % 2
+    elif opp is not None:
+        learner_seat = torch.arange(B, device=device) % 2
+    wld = [0, 0, 0]  # learner wins/losses/draws this eval window (opp slots)
 
     st_x = torch.zeros(B, MAXP, N_IN, device=device)
     st_p = torch.zeros(B, MAXP, N_ACT, device=device)
@@ -1103,13 +1162,16 @@ def cmd_train_gpu(args):
                          < plies.unsqueeze(1)) & fin.unsqueeze(1)
                 nsel = int(valid.sum())
                 if opp is not None:
-                    wf, sf = t.winner[fin], learner_seat[fin]
+                    ofin = fin if self_mask is None else (fin & ~self_mask)
+                    wf, sf = t.winner[ofin], learner_seat[ofin]
                     wld[0] += int((wf == sf).sum())
                     wld[1] += int((wf == 1 - sf).sum())
                     wld[2] += int((wf < 0).sum())
-                    if nsel:
+                    ovalid = valid if self_mask is None else \
+                        (valid & ~self_mask.unsqueeze(1))
+                    if int(ovalid.sum()):
                         ls = learner_seat.unsqueeze(1).expand(B, MAXP)
-                        assert bool((st_m[valid] == ls[valid]).all()), \
+                        assert bool((st_m[ovalid] == ls[ovalid]).all()), \
                             "recorded ply's mover != learner seat (z inverts)"
                 if nsel:
                     idx = (ptr + torch.arange(nsel, device=device)) % cap
@@ -2125,6 +2187,39 @@ def cmd_selfcheck(args):
             assert avg_len > 18, f"twin games too short ({avg_len:.1f} plies)"
             print(f"selfcheck: twin null {frac:.3f} over {n} games "
                   f"(avg {avg_len:.1f} plies, {zok} z-labels verified)")
+            # pool contract: "self" slots are plain self-play (every live ply
+            # recorded, learner moves both seats); frozen slots record only the
+            # learner's plies. Twin pool, so the fight stays fair.
+            tw2 = TensorC4(512, dev)
+            seat2 = (torch.arange(512, device=dev) // 2) % 2  # trainer's rule
+            selfm = (torch.arange(512, device=dev) % 2) == 0
+            assign = torch.where(selfm, torch.full_like(seat2, -1),
+                                 torch.zeros_like(seat2))
+            W2 = L2 = D2 = 0
+            with torch.no_grad():
+                for _ in range(200):
+                    x2, pi2, mv2, live2 = select_moves(
+                        tw2, net, ("pool", [net], assign, selfm), seat2,
+                        0.08, 0.5, 2, 10)
+                    assert bool((live2[selfm] == ~tw2.done[selfm]).all()), \
+                        "self slot did not record a live ply"
+                    fr = ~selfm
+                    assert bool((tw2.side[fr & live2] == seat2[fr & live2]).all()), \
+                        "frozen slot recorded an opponent ply"
+                    tw2.step(mv2)
+                    fin2 = tw2.done & ~selfm
+                    if bool(fin2.any()):
+                        wf2, sf2 = tw2.winner[fin2], seat2[fin2]
+                        W2 += int((wf2 == sf2).sum())
+                        L2 += int((wf2 == 1 - sf2).sum())
+                        D2 += int((wf2 < 0).sum())
+                    tw2.reset_done()
+            n2 = W2 + L2 + D2
+            assert n2 > 200, f"pool twin-null saw too few games ({n2})"
+            frac2 = W2 / n2
+            assert 0.42 <= frac2 <= 0.58, \
+                f"pool twin null broken: learner wins {frac2:.3f} of {n2}"
+            print(f"selfcheck: pool twin null {frac2:.3f} over {n2} games")
         else:
             print("selfcheck: no cuda, skipped the twin-null contract")
     except ImportError:

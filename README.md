@@ -12,6 +12,6 @@ decision gates. Each experiment preregisters its own hypotheses in this repo
 immediately before it runs.
 
 `napkin_c4.py` is a **vendored byte-copy** of the engine + instrument from
-napkin-100k-connect4 @ 162110e (md5 f73f518dfc75e8019e64262d7de2fd5b). Do not
+napkin-100k-connect4 @ 35e7171 (md5 20a134f0d520e2f2d535561bdc7f3c99). Do not
 edit it here; the nemesis harness will be a separate file importing it. The
 100KB packer and ladder submission path stay in the source repo.

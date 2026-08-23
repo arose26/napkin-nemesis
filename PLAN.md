@@ -184,8 +184,8 @@ in mind (last recipe transfer measured ~0.000 across these two games).
 
 ## Decisions locked (2026-08-22)
 1. Connect-4 confirmed as primary testbed.
-2. Engine vendored: `napkin_c4.py` is a byte-copy from napkin-100k-connect4 @ 162110e
-   (md5 f73f518dfc75e8019e64262d7de2fd5b). Do not edit the vendored file; the nemesis
+2. Engine vendored: `napkin_c4.py` is a byte-copy from napkin-100k-connect4 @ 35e7171
+   (md5 20a134f0d520e2f2d535561bdc7f3c99). Do not edit the vendored file; the nemesis
    harness lives in its own file and imports it.
 3. v2 ladder rollback approved as part of E0.
 
